@@ -4,6 +4,34 @@ from pygame.math import Vector2
 GRID_SIZE = 40
 ROTATION_STEP = 90
 
+COMPONENT_PINS = {
+    'resistor': [
+        Vector2(-20, 0),
+        Vector2(20, 0)
+    ]
+}
+
+def orthogonal_path(a, b):
+    """
+    Returns a list of points forming an orthogonal path from a to b.
+    """
+    if a.x == b.x or a.y == b.y:
+        return [b]
+
+    corner = Vector2(b.x, a.y)
+    return [corner, b]
+
+def rotate_point(point, angle_deg):
+    return point.rotate(angle_deg)
+
+def get_component_pins(comp):
+    pins = []
+    for local_pin in COMPONENT_PINS.get(comp['type'], []):
+        rotated = rotate_point(local_pin, comp['rotation'])
+        world_pos = comp['pos'] + rotated
+        pins.append(world_pos)
+    return pins
+
 def snap_to_grid(pos):
     return Vector2(
         round(pos.x / GRID_SIZE) * GRID_SIZE,
@@ -48,6 +76,13 @@ def box_select_components(components, rect, camera_offset):
             selected.append(comp)
     return selected
 
+def find_pin_at_mouse(components, mouse_world, radius=6):
+    for comp in components:
+        for pin in get_component_pins(comp):
+            if (pin - mouse_world).length() <= radius:
+                return pin
+    return None
+
 def main():
     pygame.init()
     screen = pygame.display.set_mode((800, 600))
@@ -65,6 +100,9 @@ def main():
     drag_offsets = []
     selection_start = None
     selection_rect = None
+    wires = []
+    active_wire = None
+    preview_point = None
 
     while running:
         dt = clock.tick(60) / 1000.0
@@ -75,19 +113,48 @@ def main():
         mouse_pressed = pygame.mouse.get_pressed()
         keys = pygame.key.get_pressed()
 
+        if active_wire:
+            preview_point = snap_to_grid(mouse_world)
+
         # --- EVENTS ---
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
-                    running = False
+                    active_wire = None
                 if event.key == pygame.K_r:
                     for comp in selected_components:
                         comp['rotation'] = (comp['rotation'] + ROTATION_STEP) % 360
 
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1: # left click
+                    pin = find_pin_at_mouse(components, mouse_world)
+
+                    if pin:
+                        snapped = snap_to_grid(pin)
+
+                        if active_wire is None:
+                            active_wire = {'points': [snapped]}
+                        else:
+                            last = active_wire['points'][-1]
+                            for p in orthogonal_path(last, snapped):
+                                active_wire['points'].append(p)
+                            wires.append(active_wire)
+                            active_wire = None
+                        continue
+                    
+                    if active_wire:
+                        snapped = snap_to_grid(mouse_world)
+                        last = active_wire['points'][-1]
+                        
+                        for p in orthogonal_path(last, snapped):
+                            if p != last:
+                                active_wire['points'].append(p)
+                                last = p
+
+                        continue
+
                     # check if clicking on a component
                     clicked_component = None
                     for comp in components:
@@ -150,7 +217,6 @@ def main():
                     selection_rect = None
                     drag_offsets = []
 
-
         # --- CAMERA PAN ---
         if pygame.mouse.get_pressed()[1]:
             movement = Vector2(pygame.mouse.get_rel())
@@ -188,8 +254,25 @@ def main():
             else:
                 pygame.draw.line(screen, (0, 0, 0), (rect.centerx, rect.centery-5), (rect.centerx, rect.centery+5), 2)
 
+            # --- PINS ---
+            for pin_pos in get_component_pins(comp):
+                pin_screen = world_to_screen(pin_pos, camera_offset)
+                pygame.draw.circle(screen, (200, 50, 50), pin_screen, 4)
+
         # --- MOUSE CROSS ---
         pygame.draw.circle(screen, (255, 0, 0), mouse_screen, 5)
+    
+        # --- WIRE ---
+        for wire in wires:
+            points = [world_to_screen(p, camera_offset) for p in wire['points']]
+            pygame.draw.lines(screen, (100, 200, 255), False, points, 3)
+
+        if active_wire and preview_point:
+            last = active_wire['points'][-1]
+            preview_points = orthogonal_path(last, preview_point)
+            points = active_wire['points'] + preview_points
+            points = [world_to_screen(p, camera_offset) for p in points]
+            pygame.draw.lines(screen, (200, 200, 200), False, points, 2)
 
         # --- SELECTION RECT ---
         if selection_rect:
