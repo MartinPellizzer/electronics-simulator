@@ -11,14 +11,23 @@ COMPONENT_PINS = {
     ]
 }
 
-def orthogonal_path(a, b):
+def orthogonal_path(a, b, mouse=None):
     """
     Returns a list of points forming an orthogonal path from a to b.
     """
     if a.x == b.x or a.y == b.y:
         return [b]
 
-    corner = Vector2(b.x, a.y)
+    corner_hv = Vector2(b.x, a.y)
+    corner_vh = Vector2(a.x, b.y)
+    
+    if mouse:
+        d_hv = (corner_hv - mouse).length_squared()
+        d_vh = (corner_vh - mouse).length_squared()
+        corner = corner_hv if d_hv < d_vh else corner_vh
+    else:
+        corner = corner_hv
+
     return [corner, b]
 
 def rotate_point(point, angle_deg):
@@ -37,6 +46,54 @@ def snap_to_grid(pos):
         round(pos.x / GRID_SIZE) * GRID_SIZE,
         round(pos.y / GRID_SIZE) * GRID_SIZE
     )
+
+SNAP_RADIUS = 8
+
+def snap_to_pins(mouse_world, components, radius=SNAP_RADIUS):
+    """
+    Return nearest pin within radius or None
+    """
+    closest = None
+    min_dist2 = radius * radius
+    for comp in components:
+        for pin in get_component_pins(comp):
+            d2 = (pin - mouse_world).length_squared()
+            if d2 <= min_dist2:
+                min_dist2 = d2
+                closest = pin
+    return closest
+
+def snap_to_wire_points(mouse_world, wires, radius=SNAP_RADIUS):
+    """
+    Return nearest wire point within radius or None
+    """
+    closest = None
+    min_dist2 = radius * radius
+    for wire in wires:
+        for pt in wire['points']:
+            d2 = (pt - mouse_world).length_squared()
+            if d2 <= min_dist2:
+                min_dist2 = d2
+                closest = pt
+    return closest
+
+def nearest_point_on_segment(a, b, p):
+    """
+    Return the closest point on segment a-b to point p
+    """
+    ap = p - a
+    ab = b - a
+    t = max(0, min(1, ap.dot(ab) / ab.length_squared()))
+    return a + ab * t
+
+def find_wire_segment_at_mouse(wires, mouse_world, radius=SNAP_RADIUS):
+    for wire in wires:
+        for i in range(len(wire['points']) - 1):
+            a, b = wire['points'][i], wire['points'][i +1]
+            closest = nearest_point_on_segment(a, b, mouse_world)
+            if (closest - mouse_world).length_squared() <= radius * radius:
+                return wire, i, closest
+    return None, None, None
 
 def world_to_screen(pos, camera_offset):
     return pos - camera_offset
@@ -114,7 +171,11 @@ def main():
         keys = pygame.key.get_pressed()
 
         if active_wire:
-            preview_point = snap_to_grid(mouse_world)
+            preview_point = snap_to_pins(mouse_world, components)
+            if not preview_point:
+                preview_point = snap_to_wire_points(mouse_world, wires)
+            if not preview_point:
+                preview_point = snap_to_grid(mouse_world)
 
         # --- EVENTS ---
         for event in pygame.event.get():
@@ -129,31 +190,46 @@ def main():
 
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1: # left click
-                    pin = find_pin_at_mouse(components, mouse_world)
+                    # wire splitting
+                    wire, idx, closest = find_wire_segment_at_mouse(wires, mouse_world)
+                    if wire:
+                        split_point = snap_to_grid(closest)
+            
+                        prev = wire['points'][idx]
+                        for p in orthogonal_path(prev, split_point, mouse=mouse_world):
+                            wire['points'].insert(idx + 1, p)
+                            idx += 1
 
-                    if pin:
-                        snapped = snap_to_grid(pin)
+                        # start a new wire
+                        active_wire = {'points': [split_point]}
 
-                        if active_wire is None:
-                            active_wire = {'points': [snapped]}
-                        else:
-                            last = active_wire['points'][-1]
-                            for p in orthogonal_path(last, snapped):
-                                active_wire['points'].append(p)
-                            wires.append(active_wire)
-                            active_wire = None
+                        selected_components = []
+                        drag_offsets = []
                         continue
-                    
-                    if active_wire:
-                        snapped = snap_to_grid(mouse_world)
+
+                    # find snap target
+                    snap_target = snap_to_pins(mouse_world, components)
+                    if not snap_target:
+                        snap_target = snap_to_wire_points(mouse_world, wires)
+                    if not snap_target:
+                        snap_target = snap_to_grid(mouse_world)  # fallback to grid
+
+                    # wire handling
+                    if active_wire is None:
+                        # start wire
+                        active_wire = {'points': [snap_target]}
+                    else:
+                        # add a new bend / end point
                         last = active_wire['points'][-1]
-                        
-                        for p in orthogonal_path(last, snapped):
+                        for p in orthogonal_path(last, snap_target, mouse=mouse_world):
                             if p != last:
                                 active_wire['points'].append(p)
                                 last = p
-
-                        continue
+            
+                        if find_pin_at_mouse(components, snap_target):
+                            # try snapping to pin first
+                            wires.append(active_wire)
+                            active_wire = None
 
                     # check if clicking on a component
                     clicked_component = None
@@ -267,12 +343,18 @@ def main():
             points = [world_to_screen(p, camera_offset) for p in wire['points']]
             pygame.draw.lines(screen, (100, 200, 255), False, points, 3)
 
+            for p in points:
+                pygame.draw.circle(screen, (255, 100, 50), p, 3)
+
         if active_wire and preview_point:
             last = active_wire['points'][-1]
-            preview_points = orthogonal_path(last, preview_point)
+            preview_points = orthogonal_path(last, preview_point, mouse=mouse_world)
             points = active_wire['points'] + preview_points
             points = [world_to_screen(p, camera_offset) for p in points]
             pygame.draw.lines(screen, (200, 200, 200), False, points, 2)
+
+            for p in points:
+                pygame.draw.circle(screen, (255, 100, 50), p, 3)
 
         # --- SELECTION RECT ---
         if selection_rect:
