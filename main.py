@@ -86,6 +86,20 @@ def nearest_point_on_segment(a, b, p):
     t = max(0, min(1, ap.dot(ab) / ab.length_squared()))
     return a + ab * t
 
+def clean_collinear_points(points):
+    if len(points) < 3:
+        return points.copy()
+    cleaned = [points[0]]
+    for i in range(1, len(points)-1):
+        prev = cleaned[-1]
+        curr = points[i]
+        nxt = points[i+1]
+        if (prev.x == curr.x == nxt.x) or (prev.y == curr.y == nxt.y):
+            continue
+        cleaned.append(curr)
+    cleaned.append(points[-1])
+    return cleaned
+
 def find_wire_segment_at_mouse(wires, mouse_world, radius=SNAP_RADIUS):
     for wire in wires:
         for i in range(len(wire['points']) - 1):
@@ -140,6 +154,17 @@ def find_pin_at_mouse(components, mouse_world, radius=6):
                 return pin
     return None
 
+def find_component_and_pin_under_mouse(mouse_world, components):
+    """
+    Returns (component, pin_index) if mouse is over a pin, else (None, None)
+    """
+    for comp in components:  # components must be global or pass as argument
+        pins = get_component_pins(comp)
+        for idx, pin in enumerate(pins):
+            if (pin - mouse_world).length() <= SNAP_RADIUS:
+                return comp, idx
+    return None, None
+
 def main():
     pygame.init()
     screen = pygame.display.set_mode((800, 600))
@@ -175,7 +200,8 @@ def main():
             if not preview_point:
                 preview_point = snap_to_wire_points(mouse_world, wires)
             if not preview_point:
-                preview_point = snap_to_grid(mouse_world)
+                if active_wire is not None:
+                    preview_point = snap_to_grid(mouse_world)
 
         # --- EVENTS ---
         for event in pygame.event.get():
@@ -189,49 +215,52 @@ def main():
                         comp['rotation'] = (comp['rotation'] + ROTATION_STEP) % 360
 
             elif event.type == pygame.MOUSEBUTTONDOWN:
-                if event.button == 1: # left click
-                    # wire splitting
-                    wire, idx, closest = find_wire_segment_at_mouse(wires, mouse_world)
-                    if wire:
-                        split_point = snap_to_grid(closest)
-            
-                        prev = wire['points'][idx]
-                        for p in orthogonal_path(prev, split_point, mouse=mouse_world):
-                            wire['points'].insert(idx + 1, p)
-                            idx += 1
+                if event.button == 1:  # left click
+                    # --- Step 0: Snap to pin or wire point ---
+                    clicked_pin = snap_to_pins(mouse_world, components)
+                    comp, pin_idx = find_component_and_pin_under_mouse(mouse_world, components) if clicked_pin else (None, None)
 
-                        # start a new wire
-                        active_wire = {'points': [split_point]}
+                    if not clicked_pin:
+                        # Try snapping to a wire segment (nearest point on segment)
+                        wire, idx, closest = find_wire_segment_at_mouse(wires, mouse_world)
+                        if wire:
+                            clicked_pin = snap_to_grid(closest)
+                            comp, pin_idx = None, None
 
-                        selected_components = []
-                        drag_offsets = []
-                        continue
+                            # Split exiting wire
+                            prev = wire['points'][idx]
+                            for p in orthogonal_path(prev, clicked_pin, mouse=mouse_world):
+                                if p != prev:
+                                    wire['points'].insert(idx + 1, p)
+                                    wire.setdefault('attachments', []).insert(idx + 1, None)
+                                    idx += 1
+                            wire['points'] = clean_collinear_points(wire['points'])
 
-                    # find snap target
-                    snap_target = snap_to_pins(mouse_world, components)
-                    if not snap_target:
-                        snap_target = snap_to_wire_points(mouse_world, wires)
-                    if not snap_target:
-                        snap_target = snap_to_grid(mouse_world)  # fallback to grid
-
-                    # wire handling
+                    # --- Step 1: Start or continue wire ---
+                    new_point = clicked_pin if clicked_pin else snap_to_grid(mouse_world)
                     if active_wire is None:
-                        # start wire
-                        active_wire = {'points': [snap_target]}
+                        # Start a new wire
+                        active_wire = {
+                            'points': [new_point],
+                            'attachments': [(comp, pin_idx) if clicked_pin else None]
+                        }
                     else:
-                        # add a new bend / end point
+                        # add a bend to existing wire
                         last = active_wire['points'][-1]
-                        for p in orthogonal_path(last, snap_target, mouse=mouse_world):
+                        for p in orthogonal_path(last, new_point, mouse=mouse_world):
                             if p != last:
                                 active_wire['points'].append(p)
-                                last = p
-            
-                        if find_pin_at_mouse(components, snap_target):
-                            # try snapping to pin first
+                                active_wire['attachments'].append(None)
+                        # if clicked a pin, attach it
+                        if clicked_pin:
+                            active_wire['attachments'][-1] = (comp, pin_idx)
                             wires.append(active_wire)
                             active_wire = None
 
-                    # check if clicking on a component
+                    # Done with wire click, skip further selection logic
+                    continue
+
+                    # --- Step 2: Check if clicked a component body ---
                     clicked_component = None
                     for comp in components:
                         if (comp['pos'] - snap_to_grid(mouse_world)).length() < GRID_SIZE / 2:
@@ -240,18 +269,23 @@ def main():
 
                     if clicked_component:
                         if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]:
-                            # multi-select
                             if clicked_component not in selected_components:
                                 selected_components.append(clicked_component)
                         else:
-                            # single select
                             selected_components = [clicked_component]
+
+                        # Compute drag offsets
                         drag_offsets = [comp['pos'] - mouse_world for comp in selected_components]
-                    else:
-                        # start box selection
-                        selected_components = []
-                        selection_start = mouse_screen
+
+                        selection_start = None
                         selection_rect = None
+                        continue
+
+                    # --- Step 3: Empty space → start box selection ---
+                    selected_components = []
+                    selection_start = mouse_screen
+                    selection_rect = None
+
                 elif event.button == 3: # right click
                     # delete function
                     '''
@@ -306,6 +340,17 @@ def main():
             for comp, pos in zip(selected_components, new_positions):
                 comp['pos'] = pos
 
+            # --- UPDATE WIRES ATTACHED TO MOVED COMPONENTS ---
+            for wire in wires:
+                attachments = wire.get('attachments', [])
+                points = wire['points']
+                for i, attach in enumerate(attachments):
+                    if attach and i < len(points):
+                        attached_comp, pin_idx = attach
+                        if attached_comp in selected_components:
+                            pin_world_pos = get_component_pins(attached_comp)[pin_idx]
+                            wire['points'][i] = pin_world_pos
+
         # --- DRAW ---
         screen.fill((17, 17, 17))
 
@@ -346,7 +391,7 @@ def main():
             for p in points:
                 pygame.draw.circle(screen, (255, 100, 50), p, 3)
 
-        if active_wire and preview_point:
+        if active_wire and preview_point is not None:
             last = active_wire['points'][-1]
             preview_points = orthogonal_path(last, preview_point, mouse=mouse_world)
             points = active_wire['points'] + preview_points
