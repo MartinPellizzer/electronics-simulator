@@ -1,0 +1,295 @@
+
+Perfect! Thanks for sharing the full code and clarifying your requirements. Since you want **functional programming**, extremely readable, step-by-step modular refactoring, and detailed explanations at each step, let’s slow down and plan this carefully. I’ll outline a **comprehensive refactoring plan** before touching the code.
+
+Here’s a **proposed step-by-step refactoring roadmap** for your electronics simulator:
+
+---
+
+## **Overall Refactoring Goals**
+
+1. Keep **all current behavior** intact (grid snapping, pin snapping, orthogonal wire bending, dragging, rotating, box selection, wire creation, wire attachments, camera pan, etc.).
+2. Organize code **functionally**, grouping related functions together.
+3. Split responsibilities into **logical modules/sections**:
+
+   * Grid & snapping
+   * Components & pins
+   * Wires & wire management
+   * Selection & dragging
+   * Input handling
+   * Rendering
+   * Utility/math functions
+4. Make it **easy to extend** (add new components, new snap behaviors, new wire types).
+5. Improve **readability**:
+
+   * Each function does one thing
+   * Clear naming
+   * Documented behavior
+   * Reduce deeply nested logic
+6. Facilitate **step-by-step refactoring**:
+
+   * We refactor one section at a time.
+   * After each step, you can test to ensure behavior is preserved.
+
+---
+
+## **Step-by-Step Refactoring Outline**
+
+### **STEP 0 – Prepare "sections" in the current code**
+
+* Goal: mark logical sections in your code so we can refactor without losing functionality.
+* Sections:
+
+  1. Constants & configuration (`GRID_SIZE`, `ROTATION_STEP`, etc.)
+  2. Utility math functions (`Vector2` helpers, orthogonal_path, nearest_point_on_segment, clean_collinear_points)
+  3. Snapping functions (`snap_to_grid`, `snap_to_pins`, `snap_to_wire_points`)
+  4. Component helpers (`get_component_pins`, rotate_point)
+  5. Wire helpers (`find_wire_segment_at_mouse`, etc.)
+  6. Selection & dragging (`drag_components`, `box_select_components`)
+  7. Input handling (events in main loop)
+  8. Rendering (grid, components, pins, wires, selection rectangle, mouse cross, debug text)
+  9. Camera helpers (`screen_to_world`, `world_to_screen`)
+  10. Main loop & state
+
+> This is just an organizational labeling—no code changes yet. We'll refactor **one section at a time**, keeping behavior intact.
+
+---
+
+### **STEP 1 – Isolate constants and configuration**
+
+* Create a **section/module** for constants.
+* Examples:
+
+```python
+# constants.py
+GRID_SIZE = 40
+ROTATION_STEP = 90
+SNAP_RADIUS = 8
+COMPONENT_PINS = {
+    'resistor': [Vector2(-20,0), Vector2(20,0)]
+}
+```
+
+* Refactored code will import these constants.
+
+**Goal:** All magic numbers live in one place, easier to tweak.
+
+---
+
+### **STEP 2 – Utility & math functions**
+
+* Functions:
+
+  * `orthogonal_path(a, b, mouse=None)`
+  * `rotate_point(point, angle_deg)`
+  * `nearest_point_on_segment(a, b, p)`
+  * `clean_collinear_points(points)`
+  * `make_rect(a, b)`
+* **Refactoring goals**:
+
+  1. Group in one section/file (e.g., `utils.py`)
+  2. Add **docstrings** explaining inputs/outputs clearly
+  3. Keep them **pure functions** (no side effects)
+* Example:
+
+```python
+def orthogonal_path(a: Vector2, b: Vector2, mouse: Vector2 = None) -> list[Vector2]:
+    """
+    Returns a list of intermediate points forming an orthogonal path from a to b.
+    Chooses bending direction closest to the mouse if provided.
+    """
+```
+
+* Benefits: anyone reading the code can understand the math easily.
+
+---
+
+### **STEP 3 – Component helpers**
+
+* Functions:
+
+  * `get_component_pins(comp)`
+* Goals:
+
+  1. Keep component logic **pure** (no global state)
+  2. Support rotation & position
+  3. Prepare for adding new component types easily
+* Optional: wrap component data structure in a **dict schema comment** for clarity:
+
+```python
+# component = {'type': str, 'pos': Vector2, 'rotation': int}
+```
+
+* Document `get_component_pins` clearly: “returns world positions of all pins for a component”
+
+---
+
+### **STEP 4 – Snapping functions**
+
+* Functions:
+
+  * `snap_to_grid`, `snap_to_pins`, `snap_to_wire_points`
+* Goals:
+
+  1. Keep snapping logic isolated
+  2. Prioritize pins over wires for selection
+  3. Make snapping **configurable** (radius)
+  4. Easy to extend (e.g., snapping to new elements)
+* Benefits: input handling code becomes much cleaner because snapping is delegated.
+
+---
+
+### **STEP 5 – Wire helpers**
+
+* Functions:
+
+  * `find_wire_segment_at_mouse`
+  * Wire creation/attachment
+  * Orthogonal bending logic
+* Goals:
+
+  1. Isolate wire data structure (`{'points':[...], 'attachments':[...]}`
+  2. Clean functions for updating wire points
+  3. Functions like `attach_wire_to_component(wire, comp, pin_idx)` can be added for clarity
+* Benefits: Wire logic is fully contained, easier to extend to new wire types.
+
+---
+
+### **STEP 6 – Selection & dragging**
+
+* Functions:
+
+  * `drag_components`
+  * `box_select_components`
+  * `find_pin_at_mouse`
+  * `find_component_and_pin_under_mouse`
+* Goals:
+
+  1. Cleanly separate **selection** from **wire placement**
+  2. Document exactly what each function does
+  3. Returns **updated positions / selected components** without touching global state
+* Benefits: Easier for new developers to understand selection vs. dragging vs. snapping.
+
+---
+
+### **STEP 7 – Camera helpers**
+
+* Functions:
+
+  * `screen_to_world`
+  * `world_to_screen`
+* Simple, but keep isolated for clarity
+
+---
+
+### **STEP 8 – Input handling**
+
+* Goals:
+
+  1. Refactor main loop input into **small pure functions**:
+
+     * `handle_left_click(mouse_world, components, wires, selected_components, active_wire, ...)`
+     * `handle_right_click(...)`
+     * `handle_mouse_motion(...)`
+     * `handle_key_press(...)`
+  2. Each function only handles its **particular event**
+  3. Returns **updated state**
+* Benefits: The main loop becomes readable: “for event in pygame.event(): state = handle_event(state, event)”
+
+---
+
+### **STEP 9 – Rendering**
+
+* Goals:
+
+  1. Separate drawing into functions:
+
+     * `draw_grid(screen, camera_offset)`
+     * `draw_components(screen, components, selected_components, camera_offset)`
+     * `draw_wires(screen, wires, active_wire, preview_point, camera_offset)`
+     * `draw_selection_rect(screen, selection_rect)`
+     * `draw_debug_info(screen, mouse_screen, mouse_world, fps)`
+  2. All functions **pure drawing** (no game logic)
+* Benefits: Clear separation between simulation logic and visualization.
+
+---
+
+### **STEP 10 – Main loop**
+
+* After steps 0–9, main loop should:
+
+```python
+while running:
+    dt = clock.tick(60)/1000.0
+    mouse_world = screen_to_world(mouse_screen, camera_offset)
+
+    # Input handling
+    for event in pygame.event.get():
+        state = handle_event(state, event)
+
+    # Dragging & wire updating
+    state = update_drag_and_wires(state, mouse_world)
+
+    # Camera
+    camera_offset = update_camera(camera_offset)
+
+    # Rendering
+    draw_grid(screen, camera_offset)
+    draw_components(screen, components, selected_components, camera_offset)
+    draw_wires(screen, wires, active_wire, preview_point, camera_offset)
+    draw_selection_rect(screen, selection_rect)
+    draw_debug_info(screen, mouse_screen, mouse_world, fps)
+
+    pygame.display.flip()
+```
+
+* Benefits: the **main loop becomes a readable roadmap** of simulation steps.
+
+---
+
+### **STEP 11 – Documentation**
+
+* After functional refactoring:
+
+  * Each section gets a docstring
+  * Each function has a docstring: inputs, outputs, description
+  * Examples for snapping, dragging, and orthogonal path
+* Goal: a new developer can read each function and understand **what it does without reading the entire program**
+
+---
+
+### **STEP 12 – Testing after each section**
+
+* **Critical**: After refactoring each section, test that **all features still work**:
+
+  * Wire creation & snapping
+  * Component dragging & rotation
+  * Box selection
+  * Camera pan
+  * Debug info
+* This step-by-step approach avoids breaking the simulator while improving readability.
+
+---
+
+### ✅ **Summary of the refactoring plan**
+
+| Step | Section                        |
+| ---- | ------------------------------ |
+| 0    | Label & organize code sections |
+| 1    | Constants                      |
+| 2    | Utility/math functions         |
+| 3    | Component helpers              |
+| 4    | Snapping                       |
+| 5    | Wire helpers                   |
+| 6    | Selection & dragging           |
+| 7    | Camera helpers                 |
+| 8    | Input handling                 |
+| 9    | Rendering                      |
+| 10   | Main loop cleanup              |
+| 11   | Documentation                  |
+| 12   | Test each step                 |
+
+---
+
+If you like, we can **start with Step 1 (constants) and Step 2 (utility functions)**. I’ll refactor them into clear, readable, functional style, with **docstrings and explanations** so you can learn what each function does.
+
+Do you want me to start with **Step 1 + Step 2 now**?
