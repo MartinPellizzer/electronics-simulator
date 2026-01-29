@@ -1,13 +1,12 @@
+# TODO: ai refactoring done, now move on to manual refactoring
+# new component types? ✅
+# net highlighting? ✅
+# selection modes? ✅
+# copy/paste? ✅
+
 import pygame
 from pygame.math import Vector2
-
-from math_utils import (
-    orthogonal_path,
-    rotate_point,
-    nearest_point_on_segment,
-    clean_collinear_points,
-    make_rect
-)
+import copy
 
 # ===============================
 # 1. CONSTANTS & CONFIGURATION
@@ -22,6 +21,168 @@ COMPONENT_PINS = {
         Vector2(20, 0)
     ]
 }
+
+# ===============================
+# UNDO/REDO
+# ===============================
+def take_snapshot(components, wires):
+    """
+    Return a deep copy of the world state for undo/redo.
+    """
+    return {
+        'components': copy.deepcopy(components),
+        'wires': copy.deepcopy(wires),
+    }
+
+def undo(undo_stack, redo_stack, components, wires):
+    """
+    Undo the last action.
+
+    Returns:
+        (components, wires)
+    """
+    if not undo_stack:
+        return components, wires
+
+    # Save current state to redo
+    redo_stack.append(take_snapshot(components, wires))
+
+    # Restore previous state
+    state = undo_stack.pop()
+    return copy.deepcopy(state['components']), copy.deepcopy(state['wires'])
+
+def redo(undo_stack, redo_stack, components, wires):
+    """
+    Redo the last undone action.
+
+    Returns:
+        (components, wires)
+    """
+    if not redo_stack:
+        return components, wires
+
+    # Save current state to undo
+    undo_stack.append(take_snapshot(components, wires))
+
+    # Restore next state
+    state = redo_stack.pop()
+    return copy.deepcopy(state['components']), copy.deepcopy(state['wires'])
+
+def record_undo(components, wires, undo_stack, redo_stack):
+    undo_stack.append(take_snapshot(components, wires))
+    redo_stack.clear()
+
+# ===============================
+# 2. UTILITY / MATH FUNCTIONS
+# ===============================
+def orthogonal_path(a: Vector2, b: Vector2, mouse: Vector2 = None) -> list[Vector2]:
+    """
+    Compute an orthogonal (L-shaped) path from point `a` to point `b`.
+
+    If a and b are aligned horizontally or vertically, the path is just [b].
+    Otherwise, choose a corner point to create an L-shaped path.
+
+    If `mouse` is provided, the corner closest to the mouse is chosen.
+
+    Args:
+        a (Vector2): Start point
+        b (Vector2): End point
+        mouse (Vector2, optional): Reference point to choose bend direction
+
+    Returns:
+        List[Vector2]: List of points forming the path (bends + end)
+    """
+    # If a and b are aligned, no bend needed
+    if a.x == b.x or a.y == b.y:
+        return [b]
+
+    # Possible corner points
+    corner_hv = Vector2(b.x, a.y)  # horizontal then vertical
+    corner_vh = Vector2(a.x, b.y)  # vertical then horizontal
+
+    # Pick the corner closest to mouse, if given
+    if mouse:
+        dist_hv = (corner_hv - mouse).length_squared()
+        dist_vh = (corner_vh - mouse).length_squared()
+        corner = corner_hv if dist_hv < dist_vh else corner_vh
+    else:
+        corner = corner_hv
+
+    # Return the corner followed by the final point
+    return [corner, b]
+
+def rotate_point(point: Vector2, angle_deg: float) -> Vector2:
+    """
+    Rotate a 2D vector by a given angle in degrees.
+
+    Args:
+        point (Vector2): Vector to rotate
+        angle_deg (float): Rotation angle in degrees
+
+    Returns:
+        Vector2: Rotated vector
+    """
+    return point.rotate(angle_deg)
+
+def nearest_point_on_segment(a: Vector2, b: Vector2, p: Vector2) -> Vector2:
+    """
+    Find the closest point on a line segment AB to point P.
+
+    Args:
+        a (Vector2): Segment start
+        b (Vector2): Segment end
+        p (Vector2): Reference point
+
+    Returns:
+        Vector2: Closest point on segment AB to P
+    """
+    ab = b - a
+    if ab.length_squared() == 0:
+        return a  # segment is a point
+    t = max(0, min(1, (p - a).dot(ab) / ab.length_squared()))
+    return a + ab * t
+
+def clean_collinear_points(points: list[Vector2]) -> list[Vector2]:
+    """
+    Remove points in a polyline that are collinear with neighbors (horizontal/vertical).
+
+    Args:
+        points (list[Vector2]): Input list of points
+
+    Returns:
+        list[Vector2]: Cleaned list of points
+    """
+    if len(points) < 3:
+        return points.copy()
+
+    cleaned = [points[0]]
+    for i in range(1, len(points)-1):
+        prev = cleaned[-1]
+        curr = points[i]
+        nxt = points[i+1]
+        # Skip if all three points are aligned horizontally or vertically
+        if (prev.x == curr.x == nxt.x) or (prev.y == curr.y == nxt.y):
+            continue
+        cleaned.append(curr)
+    cleaned.append(points[-1])
+    return cleaned
+
+def make_rect(a: Vector2, b: Vector2) -> pygame.Rect:
+    """
+    Create a pygame.Rect from two arbitrary points.
+
+    Args:
+        a (Vector2): First corner
+        b (Vector2): Second corner
+
+    Returns:
+        pygame.Rect: Rectangle covering both points
+    """
+    x = min(a.x, b.x)
+    y = min(a.y, b.y)
+    w = abs(a.x - b.x)
+    h = abs(a.y - b.y)
+    return pygame.Rect(x, y, w, h)
 
 # ===============================
 # 3. COMPONENT HELPERS
@@ -153,6 +314,39 @@ def find_wire_segment_at_mouse(wires: list[dict], mouse_world: Vector2, radius: 
                 return wire, i, closest
     return None, None, None
 
+def update_wire_attachments(wires):
+    """
+    Update wire points that are attached to components.
+
+    Args:
+        wires: list of wire dicts with 'points' and 'attachments'
+    """
+    for wire in wires:
+        attachments = wire.get('attachments', [])
+        for i, attach in enumerate(attachments):
+            if attach:
+                comp, pin_idx = attach
+                pin_pos = get_component_pins(comp)[pin_idx]
+                wire['points'][i] = pin_pos
+
+def delete_wire_under_mouse(wires, mouse_world, radius=SNAP_RADIUS):
+    """
+    Delete a wire if the mouse is near any of its segments.
+
+    Args:
+        wires (list[dict]): List of wires
+        mouse_world (Vector2): Mouse position in world coordinates
+        radius (float, optional): Max distance to consider wire "hit"
+
+    Returns:
+        bool: True if a wire was deleted, False otherwise
+    """
+    wire, _, _ = find_wire_segment_at_mouse(wires, mouse_world, radius)
+    if wire:
+        wires.remove(wire)
+        return True
+    return False
+
 # ===============================
 # 6. SELECTION & DRAGGING
 # ===============================
@@ -241,7 +435,7 @@ def screen_to_world(pos: Vector2, camera_offset: Vector2) -> Vector2:
 # ===============================
 # 9. INPUTS
 # ===============================
-def handle_keyboard_event(event, selected_components):
+def handle_keyboard_event(event, components, selected_components, wires, mouse_world, undo_stack, redo_stack):
     """
     Handle keyboard events.
 
@@ -254,17 +448,31 @@ def handle_keyboard_event(event, selected_components):
     """
     actions = {}
 
+    mods = pygame.key.get_mods()
+    ctrl_pressed = mods & pygame.KMOD_CTRL
+
     if event.key == pygame.K_ESCAPE:
         actions['cancel_wire'] = True
 
     if event.key == pygame.K_r:
-        # Rotate all selected components by ROTATION_STEP
+        record_undo(components, wires, undo_stack, redo_stack)  # snapshot BEFORE rotation
         for comp in selected_components:
             comp['rotation'] = (comp['rotation'] + ROTATION_STEP) % 360
 
+    if event.key == pygame.K_x:
+        # Delete wire under mouse
+        record_undo(components, wires, undo_stack, redo_stack)
+        deleted = delete_wire_under_mouse(wires, mouse_world)
+        actions['wire_deleted'] = deleted
+
+    if ctrl_pressed and event.key == pygame.K_z:
+        actions['undo'] = True
+    if ctrl_pressed and event.key == pygame.K_y:
+        actions['redo'] = True
+
     return actions
 
-def handle_mouse_button_down(event, mouse_world, mouse_screen, components, wires, active_wire, selected_components, drag_offsets, selection_start):
+def handle_mouse_button_down(event, mouse_world, mouse_screen, components, wires, active_wire, selected_components, drag_offsets, selection_start, undo_stack, redo_stack):
     """
     Handle mouse button down events.
 
@@ -309,22 +517,24 @@ def handle_mouse_button_down(event, mouse_world, mouse_screen, components, wires
                 wire['points'] = clean_collinear_points(wire['points'])
 
         # Start or continue wire
-        new_point = clicked_pin if clicked_pin else snap_to_grid(mouse_world)
-        if active_wire is None:
-            state_update['active_wire'] = {
-                'points': [new_point],
-                'attachments': [(comp, pin_idx) if clicked_pin else None]
-            }
-        else:
-            last = active_wire['points'][-1]
-            for p in orthogonal_path(last, new_point, mouse=mouse_world):
-                if p != last:
-                    active_wire['points'].append(p)
-                    active_wire['attachments'].append(None)
-            if clicked_pin:
-                active_wire['attachments'][-1] = (comp, pin_idx)
-                wires.append(active_wire)
-                state_update['active_wire'] = None
+        if clicked_pin or wire:
+            new_point = clicked_pin if clicked_pin else snap_to_grid(mouse_world)
+            if active_wire is None:
+                state_update['active_wire'] = {
+                    'points': [new_point],
+                    'attachments': [(comp, pin_idx) if clicked_pin else None]
+                }
+            else:
+                last = active_wire['points'][-1]
+                for p in orthogonal_path(last, new_point, mouse=mouse_world):
+                    if p != last:
+                        active_wire['points'].append(p)
+                        active_wire['attachments'].append(None)
+                if clicked_pin:
+                    active_wire['attachments'][-1] = (comp, pin_idx)
+                    record_undo(components, wires, undo_stack, redo_stack)  # snapshot BEFORE wire added
+                    wires.append(active_wire)
+                    state_update['active_wire'] = None
 
         # Skip selection logic if wire click occurred
         if clicked_pin or wire:
@@ -339,6 +549,7 @@ def handle_mouse_button_down(event, mouse_world, mouse_screen, components, wires
 
         keys = pygame.key.get_pressed()
         if clicked_component:
+            record_undo(components, wires, undo_stack, redo_stack)  # snapshot BEFORE drag starts
             if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]:
                 if clicked_component not in selected_components:
                     selected_components.append(clicked_component)
@@ -358,6 +569,7 @@ def handle_mouse_button_down(event, mouse_world, mouse_screen, components, wires
         return state_update
 
     elif event.button == 3:  # right click → place new component
+        record_undo(components, wires, undo_stack, redo_stack)  # snapshot BEFORE change
         snapped_pos = snap_to_grid(mouse_world)
         components.append({
             'type': 'resistor',
@@ -495,16 +707,9 @@ def draw_wires(screen, wires, camera_offset):
         for p in points:
             pygame.draw.circle(screen, (255, 100, 50), p, 3)
 
-def draw_active_wire(screen, active_wire, preview_point, mouse_world, camera_offset):
+def draw_active_wire(screen, active_wire, preview_point, mouse_world, camera_offset, components, wires):
     """
     Draws the preview of the currently active wire.
-
-    Args:
-        screen: pygame display surface
-        active_wire (dict | None): active wire being drawn
-        preview_point (Vector2 | None): snapped preview point
-        mouse_world (Vector2): mouse position in world coordinates
-        camera_offset (Vector2): camera offset
     """
     if not active_wire or preview_point is None:
         return
@@ -514,7 +719,12 @@ def draw_active_wire(screen, active_wire, preview_point, mouse_world, camera_off
     points = active_wire['points'] + preview_points
     points = [world_to_screen(p, camera_offset) for p in points]
 
-    pygame.draw.lines(screen, (200, 200, 200), False, points, 2)
+    # ===============================
+    # Highlight preview color based on snapping
+    # ===============================
+    preview_color = (200, 200, 200) if (snap_to_pins(mouse_world, components) or snap_to_wire_points(mouse_world, wires)) else (150, 150, 150)
+
+    pygame.draw.lines(screen, preview_color, False, points, 2)
 
     for p in points:
         pygame.draw.circle(screen, (255, 100, 50), p, 3)
@@ -575,6 +785,13 @@ def main():
 
     running = True
 
+    # Initialize stacks
+    undo_stack = []
+    redo_stack = []
+
+    # Before any change, optionally push initial state
+    undo_stack.append(take_snapshot(components, wires))
+
     # ===============================
     # MAIN LOOP
     # ===============================
@@ -608,9 +825,15 @@ def main():
                 running = False
 
             elif event.type == pygame.KEYDOWN:
-                actions = handle_keyboard_event(event, selected_components)
+                actions = handle_keyboard_event(
+                    event, components, selected_components, wires, mouse_world, undo_stack, redo_stack
+                )
                 if actions.get("cancel_wire"):
                     active_wire = None
+                if actions.get("undo"):
+                    components, wires = undo(undo_stack, redo_stack, components, wires)
+                if actions.get("redo"):
+                    components, wires = redo(undo_stack, redo_stack, components, wires)
 
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 state = handle_mouse_button_down(
@@ -623,6 +846,8 @@ def main():
                     selected_components,
                     drag_offsets,
                     selection_start,
+                    undo_stack,
+                    redo_stack
                 )
                 active_wire = state["active_wire"]
                 selected_components = state["selected_components"]
@@ -665,6 +890,8 @@ def main():
             for comp, pos in zip(selected_components, new_positions):
                 comp["pos"] = pos
 
+            update_wire_attachments(wires)
+
         # ===============================
         # RENDERING
         # ===============================
@@ -680,6 +907,8 @@ def main():
             preview_point,
             mouse_world,
             camera_offset,
+            components,
+            wires,
         )
         draw_selection_rect(screen, selection_rect)
         draw_debug_info(screen, font, mouse_screen, mouse_world, fps)
